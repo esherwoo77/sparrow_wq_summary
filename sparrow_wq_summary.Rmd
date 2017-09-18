@@ -1,0 +1,301 @@
+---
+title: "TBEP Seasonal WQ Dataset Creation"
+author: "Ed Sherwood <esherwood@epchc.org>"
+date: "September 18, 2017"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(leaflet)
+library(lubridate)
+library(curl)
+library(rmarkdown)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Long-Term Water Quality Monitoring Dataset (1972-Present) Background
+
+The Environmental Protection Commission of Hillsborough County (EPCHC) has been monitoring water quality in Tampa Bay for over 40 years. The EPCHC published a Surface Water Quality Monitoring Report in November 2014 which further describes the monitoring program and the parameters assessed in Tampa Bay and its tributaries. You can view the report under the “Publications” link on EPCHC’s main webpage here: <http://www.epchc.org/>. For more details about particular monitoring stations see: <http://http://www.epchc.org/index.aspx?NID=219>.
+
+The water quality monitoring data collected by the EPCHC has been the foundation for the Tampa Bay Estuary Program’s annual water quality assessments (see <http://tbeptech.org/TBEP_TECH_PUBS/2017/TBEP_01_17_2016_Decision_Matrix_Results_Update.pdf>). The following code will summarize the EPCHC dataset into a seasonal time-series of chlorophyll-a, TN and TP concentrations for the 4 main bay segments used to develop management recommendations by the TBEP. You can clone the repo with all code from here: <https://github.com/esherwoo77/sparrow_wq_summary.git>
+
+## Code to Download EPCHC Dataset
+```{r data-download}
+#URL of EPCHC's long-term dataset in Excel Spreadsheet format
+epchc_url <- "ftp://ftp.epchc.org/EPC_ERM_FTP/WQM_Reports/RWMDataSpreadsheet_ThroughCurrentReportMonth.xlsx"
+
+#Download EPCHC dataset directly into a local working directory
+#download.file(url = epchc_url, destfile = './data-raw/epchc.xlsx', method = "libcurl", mode = "wb")
+```
+
+## Code to Correctly Import EPCHC xlsx Data File into R
+The following code will import the full EPCHC dataset with formatted columns correctly into R, and then assign the columns standardized names (this can be changed in the “./data-raw/epchc_column_names.csv” file.
+
+```{r data-import}
+#EPC data column name file
+epcnames <- readLines("./data-raw/epchc_column_names.csv")
+
+#Define the TBEP Short Bay Segment Names
+bay_segments = c("OTB", "HB", "MTB", "LTB")
+
+
+#Define the EPC Stations used to generate data summaries for each bay segment
+otb_stations <- c(36, 38, 40, 41, 46, 47, 50, 51, 60, 63, 64, 65, 66, 67, 68)
+hb_stations <- c(6, 7, 8, 44, 52, 55, 70, 71, 73, 80)
+mtb_stations <- c(9, 11, 81, 84, 13, 14, 32, 33, 16, 19, 28, 82)
+ltb_stations <- c(23, 24, 25, 90, 91, 92, 93, 95)
+
+#Data frame that defines bay segment specific TBEP management targets + regulatory thresholds for chlorophyll-a concentrations
+targets <- data.frame(bay_segment = c("OTB", "HB", "MTB", "LTB"),
+                           name = c("Old Tampa Bay", "Hillsborough Bay", "Middle Tampa Bay", "Lower Tampa Bay"),
+                           chla_target = c(8.5, 13.2, 7.4, 4.6),
+                           chla_thresh = c(9.3, 15.0, 8.5, 5.1))
+                           
+#Import the raw EPCHC dataset in xlsx format into R
+epcdata <- read_xlsx("./data-raw/epchc.xlsx", 
+                     sheet="RWMDataSpreadsheet", 
+                     col_types = c("numeric", "numeric", "text", "text", "text", "text", 
+                                   "numeric", "numeric", "text", "numeric", "numeric", 
+                                   "text", "date", "text", "numeric", "text", "text", 
+                                   "numeric", "numeric", "numeric", "numeric", "text", 
+                                   "text", "text", "numeric", "text", "numeric", "text", 
+                                   "numeric", "text", "numeric", "text", "numeric", 
+                                   "text", "numeric", "text", "numeric", "text", 
+                                   "numeric", "text", "numeric", "text", "numeric", 
+                                   "text", "numeric", "text", "numeric", "text", 
+                                   "numeric", "text", "numeric", "text", "numeric", 
+                                   "text", "numeric", "text", "numeric", "text", 
+                                   "numeric", "text", "numeric", "text", "numeric", 
+                                   "text", "numeric", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text", "text", "text", "text", 
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text", "text", "text", "text",
+                                   "text", "text", "text"),
+                     col_names = epcnames, 
+                     skip=1, na="")
+
+#Once the code above is run, you can optinally save the imported data as an *.RData file and load this prior to fully running all code below.
+#save(epcdata, file = './data-raw/epcdata.RData', compress = 'xz')
+#load('./data-raw/epcdata.Rdata')
+```
+
+##Code to Run Some Crude Checks on the Imported Data & Assign New Variables
+Filter entire EPCHC dataset for the particular bay segment sites defined above and create a standard plot to depict the sites used in the subsequent analyses.
+```{r}
+#Filter entire EPCHC dataset
+wqdata <- epcdata %>%
+          select(StationNumber,
+                 Latitude,
+                 Longitude,
+                 SampleTime,
+                 Total_Depth_m,
+                 Sample_Depth_m,
+                 Secchi_Depth_m,
+                 Secchi_Q,
+                 Total_Nitrogen_mgL,
+                 Total_Nitrogen_Q,
+                 Total_Phosphorus_mgL,
+                 Total_Phosphorus_Q,
+                 Chlorophyll_a_uncorr_ugL,
+                 Chlorophyll_a_uncorr_Q) %>% 
+          mutate(epchc_station = as.numeric(StationNumber),
+                 sd_m = as.numeric(Secchi_Depth_m),
+                 sd_check = as.numeric((Total_Depth_m*3.2809)-(Secchi_Depth_m*3.2809)),
+                 chla = as.numeric(Chlorophyll_a_uncorr_ugL),
+                 tn = as.numeric(Total_Nitrogen_mgL),
+                 tp = as.numeric(Total_Phosphorus_mgL),
+                 yr = year(SampleTime),
+                 mo = month(SampleTime)) %>% 
+          filter(epchc_station %in% c(otb_stations, hb_stations, mtb_stations, ltb_stations))
+
+#Assign NAs to VOB secchi disk depths or secchis <0.5ft from bottom -- Janicki protocols
+wqdata <- within(wqdata, sd_m[Secchi_Q == ">"] <- NA)
+wqdata <- within(wqdata, sd_m[sd_check < 0.5] <- NA)
+
+#Assign short bay_segment code to the select stations in our previously defined lists
+wqdata$bay_segment <- ifelse(wqdata$epchc_station %in% hb_stations, "HB",
+                             ifelse(wqdata$epchc_station %in% otb_stations, "OTB",
+                                    ifelse(wqdata$epchc_station %in% mtb_stations, "MTB",
+                                           ifelse(wqdata$epchc_station %in% ltb_stations, "LTB",NA))))
+
+#Assign seasonal quarter timeseries to the dataset (1 = Jan - Mar; 2 = Apr - Jun; 3 = Jul - Sep; 4 = Oct - Dec)
+
+wqdata$season <- quarter(wqdata$SampleTime, with_year = TRUE)
+
+#Display station locations
+wqsites <- wqdata %>% 
+           select(epchc_station, bay_segment, Latitude, Longitude) %>% 
+           unique()
+
+pal <- colorFactor(palette = c('red', 'blue', 'green', 'black'),
+                   domain = wqsites$bay_segment)
+
+map <- leaflet(wqsites) %>% 
+              addProviderTiles(providers$CartoDB.Positron) %>% 
+              addCircleMarkers(~Longitude, ~Latitude,
+                               radius = 6,
+                               color = ~pal(bay_segment),
+                               stroke = FALSE,
+                               popup = ~as.character(paste('EPC Station:', epchc_station)), 
+                               group = ~bay_segment) %>% 
+              addLayersControl(overlayGroups = ~bay_segment,
+                               options = layersControlOptions(collapsed = FALSE))
+map
+```
+
+##Generate Seasonal Averages for Water Quality Parameters of Interest
+
+```{r}
+#Generate seasonal averages for chlorophyll-a by bay segment
+tb_seasonal_chla <- wqdata %>% 
+                      select(season, bay_segment, chla) %>%
+                      drop_na() %>%
+                      group_by(season, bay_segment) %>%
+                      summarise(mean_chla = mean(chla))
+
+#Generate seasonal averages for total nitrogen by bay segment
+tb_seasonal_tn <- wqdata %>% 
+                      select(season, bay_segment, tn) %>%
+                      drop_na() %>%
+                      group_by(season, bay_segment) %>%
+                      summarise(mean_tn = mean(tn))
+
+#Generate seasonal averages for total phosphorus by bay segment
+tb_seasonal_tp <- wqdata %>% 
+                      select(season, bay_segment, tp) %>%
+                      drop_na() %>%
+                      group_by(season, bay_segment) %>%
+                      summarise(mean_tp = mean(tp))
+
+#Combine datasets to write to a CSV file for USGS-NASA SPARROW Modelers
+tb_seasonal_avg <- tb_seasonal_chla %>% 
+                     full_join(tb_seasonal_tn, by = c("season", "bay_segment")) %>% 
+                     full_join(tb_seasonal_tp, by = c("season", "bay_segment"))
+
+write.csv(tb_seasonal_avg, file = "./data-raw/tb_seasonal_averages.csv")
+```
+
+##Plot Mean Seasonal Chl-a Values by Bay Segment {.tabset}
+```{r plot_chla_seasonal_averages, results='asis'}
+cols <- c("Seasonal Mean"="blue", "Management Target"="red", "Regulatory Threshold"="darkred")
+for (i in seq_along(bay_segments)) {
+   chlaplot <- tb_seasonal_chla %>%
+                 filter(bay_segment == bay_segments[i] & season<2017.1) %>% 
+                 ggplot(aes(x=season)) + 
+                   geom_point(aes(y=mean_chla, colour="Seasonal Mean"), size=2.5) +
+                   geom_line(aes(y=mean_chla, colour="Seasonal Mean"), size=0.5) +
+                   geom_hline(data=targets, aes(yintercept = as.numeric(chla_thresh[i]),
+                                                colour="Regulatory Threshold")) +
+                   geom_hline(data=targets, aes(yintercept = as.numeric(chla_target[i]),
+                                                colour="Management Target"), linetype="dashed") +
+                   ggtitle(paste(targets$name[i])) +
+                   geom_text(data=targets, parse = TRUE,
+                             aes(1973.1, as.numeric(chla_thresh[i]),
+                                 label = paste(chla_thresh[i],"~ mu * g%.%L^{-1}"),
+                                 hjust = 0.2, vjust = -0.3)) +
+                   geom_text(data=targets, parse = TRUE,
+                             aes(1973.1, as.numeric(chla_target[i]),
+                                 label = paste(chla_target[i],"~ mu * g%.%L^{-1}"),
+                                 hjust = 0.2, vjust = 0.9)) +
+                   ylab(expression("Mean Seasonal Chlorophyll-a ("~ mu * "g\u00B7L"^-1 *")")) +
+                   xlab("") +
+                   scale_x_continuous(breaks=seq(1973,2017,by=1),
+                                      labels=c(1973, rep("",3), 1977, rep("",3), 1981, rep("",3),
+                                               1985, rep("",3), 1989, rep("",3), 1993, rep("",3),
+                                               1997, rep("",3), 2001, rep("",3), 2005, rep("",3),
+                                               2009, rep("",3), 2013, rep("",3), 2017),
+                                      expand = c(0.035,0)) +
+                   theme(plot.title = element_text(hjust = 0.5),
+                         panel.grid.minor=element_blank(),
+                         panel.grid.major=element_blank(),
+                         legend.position = c(0.88, 0.93),
+                         legend.background = element_rect(fill=NA)) +
+                   scale_colour_manual(name="", values = cols,
+                                       labels=c("Management Target", "Regulatory Threshold", "Seasonal Mean"))
+                   
+      cat("###", paste(targets$name[i]), "\n")
+   print(chlaplot)
+   cat("\n\n")
+}   
+```
+
+##Plot Mean Seasonal TN Values by Bay Segment {.tabset}
+```{r plot_tn_seasonal_averages, results='asis'}
+cols <- c("Seasonal Mean"="blue", "Management Target"="red", "Regulatory Threshold"="darkred")
+for (i in seq_along(bay_segments)) {
+   chlaplot <- tb_seasonal_tn %>%
+                 filter(bay_segment == bay_segments[i] & season<2017.1) %>% 
+                 ggplot(aes(x=season)) + 
+                   geom_point(aes(y=mean_tn, colour="Seasonal Mean"), size=2.5) +
+                   geom_line(aes(y=mean_tn, colour="Seasonal Mean"), size=0.5) +
+                   ggtitle(paste(targets$name[i])) +
+                   ylab(expression("Mean Seasonal Total Nitrogen ( " *  "mg\u00B7L"^-1 *")")) +
+                   xlab("") +
+                   scale_x_continuous(breaks=seq(1973,2017,by=1),
+                                      labels=c(1973, rep("",3), 1977, rep("",3), 1981, rep("",3),
+                                               1985, rep("",3), 1989, rep("",3), 1993, rep("",3),
+                                               1997, rep("",3), 2001, rep("",3), 2005, rep("",3),
+                                               2009, rep("",3), 2013, rep("",3), 2017),
+                                      expand = c(0.035,0)) +
+                   theme(plot.title = element_text(hjust = 0.5),
+                         panel.grid.minor=element_blank(),
+                         panel.grid.major=element_blank(),
+                         legend.position = c(0.88, 0.93),
+                         legend.background = element_rect(fill=NA)) +
+                   scale_colour_manual(name="", values = cols,
+                                       labels=c("Seasonal Mean"))
+                   
+      cat("###", paste(targets$name[i]), "\n")
+   print(chlaplot)
+   cat("\n\n")
+}   
+```
+
+##Plot Mean Seasonal TP Values by Bay Segment {.tabset}
+```{r plot_tp_seasonal_averages, results='asis'}
+cols <- c("Seasonal Mean"="blue", "Management Target"="red", "Regulatory Threshold"="darkred")
+for (i in seq_along(bay_segments)) {
+   chlaplot <- tb_seasonal_tp %>%
+                 filter(bay_segment == bay_segments[i] & season<2017.1) %>% 
+                 ggplot(aes(x=season)) + 
+                   geom_point(aes(y=mean_tp, colour="Seasonal Mean"), size=2.5) +
+                   geom_line(aes(y=mean_tp, colour="Seasonal Mean"), size=0.5) +
+                   ggtitle(paste(targets$name[i])) +
+                   ylab(expression("Mean Seasonal Total Phosphorus ( " *  "mg\u00B7L"^-1 *")")) +
+                   xlab("") +
+                   scale_x_continuous(breaks=seq(1973,2017,by=1),
+                                      labels=c(1973, rep("",3), 1977, rep("",3), 1981, rep("",3),
+                                               1985, rep("",3), 1989, rep("",3), 1993, rep("",3),
+                                               1997, rep("",3), 2001, rep("",3), 2005, rep("",3),
+                                               2009, rep("",3), 2013, rep("",3), 2017),
+                                      expand = c(0.035,0)) +
+                   theme(plot.title = element_text(hjust = 0.5),
+                         panel.grid.minor=element_blank(),
+                         panel.grid.major=element_blank(),
+                         legend.position = c(0.88, 0.93),
+                         legend.background = element_rect(fill=NA)) +
+                   scale_colour_manual(name="", values = cols,
+                                       labels=c("Seasonal Mean"))
+                   
+      cat("###", paste(targets$name[i]), "\n")
+   print(chlaplot)
+   cat("\n\n")
+}   
+```
